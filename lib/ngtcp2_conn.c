@@ -37,6 +37,8 @@
 #include "ngtcp2_rcvry.h"
 #include "ngtcp2_unreachable.h"
 
+#include <stdio.h>
+
 /* NGTCP2_FLOW_WINDOW_RTT_FACTOR is the factor of RTT when flow
    control window auto-tuning is triggered. */
 #define NGTCP2_FLOW_WINDOW_RTT_FACTOR 2
@@ -66,6 +68,18 @@ static int bidi_stream(int64_t stream_id) { return (stream_id & 0x2) == 0; }
  * completed.
  */
 static int conn_is_handshake_completed(ngtcp2_conn *conn) {
+  if (!(conn->flags & NGTCP2_CONN_FLAG_HANDSHAKE_COMPLETED))
+  {
+    fprintf(stderr, "\nNGTCP2 HANDSHAKE FLAG_HANDSHAKE_COMPLETED not set %d\n\n", __LINE__);
+  }
+  if (!conn->pktns.crypto.rx.ckm)
+  {
+    fprintf(stderr, "\nNGTCP2 HANDSHAKE conn->pktns.crypto.rx.ckm not set %d\n\n", __LINE__);
+  }
+  if (!conn->pktns.crypto.tx.ckm)
+  {
+    fprintf(stderr, "\nNGTCP2 HANDSHAKE conn->pktns.crypto.tx.ckm not set %d\n\n", __LINE__);
+  }
   return (conn->flags & NGTCP2_CONN_FLAG_HANDSHAKE_COMPLETED) &&
          conn->pktns.crypto.rx.ckm && conn->pktns.crypto.tx.ckm;
 }
@@ -129,12 +143,13 @@ static int conn_call_recv_crypto_data(ngtcp2_conn *conn,
   rv = conn->callbacks.recv_crypto_data(conn, crypto_level, offset, data,
                                         datalen, conn->user_data);
   switch (rv) {
+  case NGTCP2_ERR_PROTO:
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
   case 0:
   case NGTCP2_ERR_CRYPTO:
   case NGTCP2_ERR_REQUIRED_TRANSPORT_PARAM:
   case NGTCP2_ERR_MALFORMED_TRANSPORT_PARAM:
   case NGTCP2_ERR_TRANSPORT_PARAM:
-  case NGTCP2_ERR_PROTO:
   case NGTCP2_ERR_VERSION_NEGOTIATION_FAILURE:
   case NGTCP2_ERR_NOMEM:
   case NGTCP2_ERR_CALLBACK_FAILURE:
@@ -1773,6 +1788,16 @@ static int conn_create_ack_frame(ngtcp2_conn *conn, ngtcp2_frame **pfr,
     ngtcp2_acktr_forget(acktr, ngtcp2_ksl_it_get(&it));
   }
 
+last_pkt_num = ack->largest_ack - ack->first_ack_range;
+fprintf(stderr, "\nACK for ranges: [%ld,%ld], ", last_pkt_num, ack->largest_ack);
+for (range_idx = 0; range_idx < ack->rangecnt; range_idx++)
+{
+  range = &ack->ranges[range_idx];
+  last_pkt_num = last_pkt_num - range->gap - range->len - 1;
+  fprintf(stderr, "[%ld,%ld], ", last_pkt_num, last_pkt_num + range->len);
+}
+fprintf(stderr, "\n");
+
   *pfr = conn->tx.ack;
 
   return 0;
@@ -1797,6 +1822,7 @@ static int conn_ppe_write_frame_hd_log(ngtcp2_conn *conn, ngtcp2_ppe *ppe,
   rv = ngtcp2_ppe_encode_frame(ppe, fr);
   if (rv != 0) {
     assert(NGTCP2_ERR_NOBUF == rv);
+    fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     return rv;
   }
 
@@ -2614,6 +2640,7 @@ conn_write_handshake_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi, uint8_t *dest,
   rv = ngtcp2_ppe_encode_hd(&ppe, &hd);
   if (rv != 0) {
     assert(NGTCP2_ERR_NOBUF == rv);
+    fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     return 0;
   }
 
@@ -2633,6 +2660,7 @@ conn_write_handshake_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi, uint8_t *dest,
     rv = conn_ppe_write_frame_hd_log(conn, &ppe, &hd_logged, &hd, ackfr);
     if (rv != 0) {
       assert(NGTCP2_ERR_NOBUF == rv);
+      fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     } else {
       ngtcp2_acktr_commit_ack(&pktns->acktr);
       ngtcp2_acktr_add_ack(&pktns->acktr, hd.pkt_num, ackfr->ack.largest_ack);
@@ -2825,6 +2853,25 @@ conn_write_handshake_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi, uint8_t *dest,
   ngtcp2_qlog_metrics_updated(&conn->qlog, &conn->cstat);
 
   ++pktns->tx.last_pkt_num;
+  // last_pkt_num is the packet number which the local endpoint sent last time
+  fprintf(stderr, "\npktns->tx.last_pkt_num set to %ld\n", pktns->tx.last_pkt_num);
+  // num_non_ack_pkt is the number of continuous non ACK-eliciting packets
+  fprintf(stderr, "\npktns->tx.num_non_ack_pkt set to %ld\n", pktns->tx.num_non_ack_pkt);
+
+  // max_pkt_num is the largest packet number received so far
+  fprintf(stderr, "Max packet num %ld\n", pktns->rx.max_pkt_num);
+  // max_ack_eliciting_pkt_num is the largest ack-eliciting packet number received so far
+  fprintf(stderr, "Max ACK eliciting pkt num %ld\n", pktns->rx.max_ack_eliciting_pkt_num);
+
+  // num_ack_eliciting is the number of ACK eliciting entries
+  fprintf(stderr, "Num ack eliciting entries %ld\n", pktns->rtb.num_ack_eliciting);
+  // num_lost_pkts is the number entries in ents which has NGTCP2_RTB_ENTRY_FLAG_LOST_RETRANSMITTED flag set
+  fprintf(stderr, "Num lost pkts %ld\n", pktns->rtb.num_lost_pkts);
+  // largest_acked_tx_pkt_num is the largest packet number acknowledged by the peer
+  fprintf(stderr, "Largest ACKed tx packet num %ld\n", pktns->rtb.largest_acked_tx_pkt_num);
+
+  // rx_npkt is the number of ACK eliciting packets received without sending ACK
+  fprintf(stderr, "Num of ACK eliciting packets received without sending ACK %ld\n", pktns->acktr.rx_npkt);
 
   return spktlen;
 }
@@ -2851,6 +2898,7 @@ static ngtcp2_ssize conn_write_ack_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
   ngtcp2_duration ack_delay;
   uint64_t ack_delay_exponent;
   ngtcp2_ssize spktlen;
+fprintf(stderr, "\nconn_write_ack_pkt at line %d\n", __LINE__);
 
   assert(!(conn->flags & NGTCP2_CONN_FLAG_PPE_PENDING));
 
@@ -2900,6 +2948,7 @@ static ngtcp2_ssize conn_write_ack_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
 
   conn->dcid.current.bytes_sent += (uint64_t)spktlen;
 
+fprintf(stderr, "\nconn_write_ack_pkt retval %ld at line %d\n", spktlen, __LINE__);
   return spktlen;
 }
 
@@ -3505,6 +3554,8 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
   const ngtcp2_cid *scid = NULL;
   int keep_alive_expired = 0;
   uint32_t version = 0;
+size_t buflen = 0;
+size_t buflen_old = 0;
 
   /* Return 0 if destlen is less than minimum packet length which can
      trigger Stateless Reset */
@@ -3627,10 +3678,18 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
       assert(NGTCP2_ERR_NOBUF == rv);
       return 0;
     }
+buflen = ngtcp2_buf_len(&ppe->buf);
+buflen_old = buflen;
 
     if (!ngtcp2_ppe_ensure_hp_sample(ppe)) {
       return 0;
     }
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
 
     if (ngtcp2_ringbuf_len(&conn->rx.path_challenge.rb)) {
       pcent = ngtcp2_ringbuf_get(&conn->rx.path_challenge.rb, 0);
@@ -3646,6 +3705,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
         if (rv != 0) {
           assert(NGTCP2_ERR_NOBUF == rv);
         } else {
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
           ngtcp2_ringbuf_pop_front(&conn->rx.path_challenge.rb);
 
           pkt_empty = 0;
@@ -3670,6 +3735,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
       if (rv != 0) {
         assert(NGTCP2_ERR_NOBUF == rv);
       } else {
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
         ngtcp2_acktr_commit_ack(&pktns->acktr);
         ngtcp2_acktr_add_ack(&pktns->acktr, hd->pkt_num,
                              ackfr->ack.largest_ack);
@@ -3763,6 +3834,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
         assert(NGTCP2_ERR_NOBUF == rv);
         break;
       }
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
 
       pkt_empty = 0;
       rtb_entry_flags |= NGTCP2_RTB_ENTRY_FLAG_ACK_ELICITING |
@@ -3801,6 +3878,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
         if (rv != 0) {
           ngtcp2_unreachable();
         }
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
 
         *pfrc = nfrc;
         pfrc = &(*pfrc)->next;
@@ -3838,6 +3921,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
       if (rv != 0) {
         assert(NGTCP2_ERR_NOBUF == rv);
       } else {
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
         pkt_empty = 0;
         rtb_entry_flags |= NGTCP2_RTB_ENTRY_FLAG_ACK_ELICITING |
                            NGTCP2_RTB_ENTRY_FLAG_PTO_ELICITING |
@@ -3871,6 +3960,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
         if (rv != 0) {
           assert(NGTCP2_ERR_NOBUF == rv);
         } else {
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
           pkt_empty = 0;
           rtb_entry_flags |= NGTCP2_RTB_ENTRY_FLAG_ACK_ELICITING |
                              NGTCP2_RTB_ENTRY_FLAG_PTO_ELICITING |
@@ -3927,6 +4022,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
             assert(NGTCP2_ERR_NOBUF == rv);
             break;
           }
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
 
           pkt_empty = 0;
           rtb_entry_flags |= NGTCP2_RTB_ENTRY_FLAG_ACK_ELICITING |
@@ -3975,6 +4076,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
         if (rv != 0) {
           ngtcp2_unreachable();
         }
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
 
         *pfrc = nfrc;
         pfrc = &(*pfrc)->next;
@@ -4010,6 +4117,7 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
         return rv;
       }
       if (num_reclaimed) {
+        fprintf(stderr, "\nreclaimed %ld packets to retransmit on line %d\n\n", num_reclaimed, __LINE__);
         goto build_pkt;
       }
 
@@ -4068,6 +4176,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
     if (rv != 0) {
       ngtcp2_unreachable();
     }
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
 
     *pfrc = nfrc;
     pfrc = &(*pfrc)->next;
@@ -4107,6 +4221,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
 
       rv = conn_ppe_write_frame_hd_log(conn, ppe, &hd_logged, hd, &nfrc->fr);
       assert(rv == 0);
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
 
       /* Because DATAGRAM will not be retransmitted, we do not use
          data anymore.  Just nullify it.  The only reason to keep
@@ -4124,6 +4244,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
 
       rv = conn_ppe_write_frame_hd_log(conn, ppe, &hd_logged, hd, &lfr);
       assert(rv == 0);
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
     }
 
     pkt_empty = 0;
@@ -4195,6 +4321,12 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
         /* TODO If buffer is too small, PING cannot be written if
            packet is still empty. */
       } else {
+buflen = ngtcp2_buf_len(&ppe->buf);
+if (buflen > buflen_old)
+{
+  fprintf(stderr, "\nbuflen increased from %ld to %ld on line %d\n\n", buflen_old, buflen, __LINE__);
+  buflen_old = buflen;
+}
         rtb_entry_flags |= NGTCP2_RTB_ENTRY_FLAG_ACK_ELICITING;
         if (conn->pktns.rtb.probe_pkt_left) {
           rtb_entry_flags |= NGTCP2_RTB_ENTRY_FLAG_PROBE;
@@ -4306,6 +4438,25 @@ static ngtcp2_ssize conn_write_pkt(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
   ngtcp2_qlog_metrics_updated(&conn->qlog, &conn->cstat);
 
   ++pktns->tx.last_pkt_num;
+  // last_pkt_num is the packet number which the local endpoint sent last time
+  fprintf(stderr, "\npktns->tx.last_pkt_num set to %ld\n", pktns->tx.last_pkt_num);
+  // num_non_ack_pkt is the number of continuous non ACK-eliciting packets
+  fprintf(stderr, "\npktns->tx.num_non_ack_pkt set to %ld\n", pktns->tx.num_non_ack_pkt);
+
+  // max_pkt_num is the largest packet number received so far
+  fprintf(stderr, "Max packet num %ld\n", pktns->rx.max_pkt_num);
+  // max_ack_eliciting_pkt_num is the largest ack-eliciting packet number received so far
+  fprintf(stderr, "Max ACK eliciting pkt num %ld\n", pktns->rx.max_ack_eliciting_pkt_num);
+
+  // num_ack_eliciting is the number of ACK eliciting entries
+  fprintf(stderr, "Num ack eliciting entries %ld\n", pktns->rtb.num_ack_eliciting);
+  // num_lost_pkts is the number entries in ents which has NGTCP2_RTB_ENTRY_FLAG_LOST_RETRANSMITTED flag set
+  fprintf(stderr, "Num lost pkts %ld\n", pktns->rtb.num_lost_pkts);
+  // largest_acked_tx_pkt_num is the largest packet number acknowledged by the peer
+  fprintf(stderr, "Largest ACKed tx packet num %ld\n", pktns->rtb.largest_acked_tx_pkt_num);
+
+  // rx_npkt is the number of ACK eliciting packets received without sending ACK
+  fprintf(stderr, "Num of ACK eliciting packets received without sending ACK %ld\n", pktns->acktr.rx_npkt);
 
   return nwrite;
 }
@@ -4504,6 +4655,25 @@ ngtcp2_ssize ngtcp2_conn_write_single_frame_pkt(
   ngtcp2_qlog_metrics_updated(&conn->qlog, &conn->cstat);
 
   ++pktns->tx.last_pkt_num;
+  // last_pkt_num is the packet number which the local endpoint sent last time
+  fprintf(stderr, "\npktns->tx.last_pkt_num set to %ld\n", pktns->tx.last_pkt_num);
+  // num_non_ack_pkt is the number of continuous non ACK-eliciting packets
+  fprintf(stderr, "\npktns->tx.num_non_ack_pkt set to %ld\n", pktns->tx.num_non_ack_pkt);
+
+  // max_pkt_num is the largest packet number received so far
+  fprintf(stderr, "Max packet num %ld\n", pktns->rx.max_pkt_num);
+  // max_ack_eliciting_pkt_num is the largest ack-eliciting packet number received so far
+  fprintf(stderr, "Max ACK eliciting pkt num %ld\n", pktns->rx.max_ack_eliciting_pkt_num);
+
+  // num_ack_eliciting is the number of ACK eliciting entries
+  fprintf(stderr, "Num ack eliciting entries %ld\n", pktns->rtb.num_ack_eliciting);
+  // num_lost_pkts is the number entries in ents which has NGTCP2_RTB_ENTRY_FLAG_LOST_RETRANSMITTED flag set
+  fprintf(stderr, "Num lost pkts %ld\n", pktns->rtb.num_lost_pkts);
+  // largest_acked_tx_pkt_num is the largest packet number acknowledged by the peer
+  fprintf(stderr, "Largest ACKed tx packet num %ld\n", pktns->rtb.largest_acked_tx_pkt_num);
+
+  // rx_npkt is the number of ACK eliciting packets received without sending ACK
+  fprintf(stderr, "Num of ACK eliciting packets received without sending ACK %ld\n", pktns->acktr.rx_npkt);
 
   return nwrite;
 }
@@ -5352,6 +5522,7 @@ static int conn_on_retry(ngtcp2_conn *conn, const ngtcp2_pkt_hd *hd,
                                                   retry.odcid.datalen));
 
   if (retry.token.len == 0) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -5439,6 +5610,7 @@ static int conn_recv_ack(ngtcp2_conn *conn, ngtcp2_pktns *pktns, ngtcp2_ack *fr,
   ngtcp2_conn_stat *cstat = &conn->cstat;
 
   if (pktns->tx.last_pkt_num < fr->largest_ack) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d; last_pkt_num=%ld, largest_ack=%ld\n\n", __LINE__, pktns->tx.last_pkt_num, fr->largest_ack);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -5745,6 +5917,7 @@ decrypt_hp(ngtcp2_pkt_hd *hd, uint8_t *dest, const ngtcp2_crypto_cipher *hp,
   assert(hp_mask);
 
   if (pkt_num_offset + 4 + NGTCP2_HP_SAMPLELEN > pktlen) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -6062,6 +6235,7 @@ static int verify_token(const ngtcp2_vec *token, const ngtcp2_pkt_hd *hd) {
       ngtcp2_cmemeq(token->base, hd->token.base, token->len)) {
     return 0;
   }
+  fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
   return NGTCP2_ERR_PROTO;
 }
 
@@ -6536,6 +6710,7 @@ conn_recv_handshake_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
   }
 
   if (invalid_reserved_bits) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -6586,6 +6761,7 @@ conn_recv_handshake_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
     if (hd.type == NGTCP2_PKT_INITIAL) {
       return NGTCP2_ERR_DISCARD_PKT;
     }
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -6657,6 +6833,7 @@ conn_recv_handshake_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
       require_ack = 1;
       break;
     default:
+      fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return NGTCP2_ERR_PROTO;
     }
 
@@ -6991,16 +7168,19 @@ static int conn_recv_crypto(ngtcp2_conn *conn, ngtcp2_crypto_level crypto_level,
     rx_offset += datalen;
     rv = ngtcp2_strm_update_rx_offset(crypto, rx_offset);
     if (rv != 0) {
+      if (rv == NGTCP2_ERR_PROTO) fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return rv;
     }
 
     rv = conn_call_recv_crypto_data(conn, crypto_level, offset, data, datalen);
     if (rv != 0) {
+      if (rv == NGTCP2_ERR_PROTO) fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return rv;
     }
 
     rv = conn_emit_pending_crypto_data(conn, crypto_level, crypto, rx_offset);
     if (rv != 0) {
+      if (rv == NGTCP2_ERR_PROTO) fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return rv;
     }
 
@@ -7372,6 +7552,7 @@ static int conn_recv_reset_stream(ngtcp2_conn *conn,
     idtr = &conn->remote.bidi.idtr;
   } else {
     if (local_stream) {
+      fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return NGTCP2_ERR_PROTO;
     }
     if (conn->remote.uni.max_streams < ngtcp2_ord_stream_id(fr->stream_id)) {
@@ -7748,6 +7929,7 @@ static int conn_recv_new_connection_id(ngtcp2_conn *conn,
   size_t extra_dcid = 0;
 
   if (conn->dcid.current.cid.datalen == 0) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -7782,6 +7964,7 @@ static int conn_recv_new_connection_id(ngtcp2_conn *conn,
     rv = ngtcp2_dcid_verify_uniqueness(dcid, fr->seq, &fr->cid,
                                        fr->stateless_reset_token);
     if (rv != 0) {
+      fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return NGTCP2_ERR_PROTO;
     }
     if (ngtcp2_cid_eq(&dcid->cid, &fr->cid)) {
@@ -7796,6 +7979,7 @@ static int conn_recv_new_connection_id(ngtcp2_conn *conn,
     rv = ngtcp2_dcid_verify_uniqueness(dcid, fr->seq, &fr->cid,
                                        fr->stateless_reset_token);
     if (rv != 0) {
+      fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return NGTCP2_ERR_PROTO;
     }
     if (ngtcp2_cid_eq(&dcid->cid, &fr->cid)) {
@@ -8006,6 +8190,7 @@ static int conn_recv_retire_connection_id(ngtcp2_conn *conn,
   ngtcp2_scid *scid;
 
   if (conn->oscid.datalen == 0 || conn->scid.last_seq < fr->seq) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -8014,6 +8199,7 @@ static int conn_recv_retire_connection_id(ngtcp2_conn *conn,
     scid = ngtcp2_ksl_it_get(&it);
     if (scid->seq == fr->seq) {
       if (ngtcp2_cid_eq(&scid->cid, &hd->dcid)) {
+        fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
         return NGTCP2_ERR_PROTO;
       }
 
@@ -8049,6 +8235,7 @@ static int conn_recv_retire_connection_id(ngtcp2_conn *conn,
  */
 static int conn_recv_new_token(ngtcp2_conn *conn, const ngtcp2_new_token *fr) {
   if (conn->server) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -8174,6 +8361,7 @@ static int conn_recv_handshake_done(ngtcp2_conn *conn, ngtcp2_tstamp ts) {
   int rv;
 
   if (conn->server) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -8634,6 +8822,7 @@ conn_recv_delayed_handshake_pkt(ngtcp2_conn *conn, const ngtcp2_pkt_info *pi,
 
   if (payloadlen == 0) {
     /* QUIC packet must contain at least one frame */
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -8682,6 +8871,7 @@ conn_recv_delayed_handshake_pkt(ngtcp2_conn *conn, const ngtcp2_pkt_info *pi,
       require_ack = 1;
       break;
     default:
+      fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
       return NGTCP2_ERR_PROTO;
     }
 
@@ -8978,6 +9168,7 @@ static ngtcp2_ssize conn_recv_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
     ngtcp2_log_info(&conn->log, NGTCP2_LOG_EVENT_PKT,
                     "packet has incorrect reserved bits");
 
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -8992,6 +9183,7 @@ static ngtcp2_ssize conn_recv_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
 
   if (payloadlen == 0) {
     /* QUIC packet must contain at least one frame */
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -9060,6 +9252,7 @@ static ngtcp2_ssize conn_recv_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
     case NGTCP2_FRAME_ACK_ECN:
       if ((hd.flags & NGTCP2_PKT_FLAG_LONG_FORM) &&
           hd.type == NGTCP2_PKT_0RTT) {
+        fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
         return NGTCP2_ERR_PROTO;
       }
       assert(conn->remote.transport_params);
@@ -9093,6 +9286,7 @@ static ngtcp2_ssize conn_recv_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
       case NGTCP2_FRAME_DATAGRAM_LEN:
         break;
       default:
+        fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
         return NGTCP2_ERR_PROTO;
       }
     }
@@ -9239,6 +9433,7 @@ static ngtcp2_ssize conn_recv_pkt(ngtcp2_conn *conn, const ngtcp2_path *path,
     case NGTCP2_FRAME_DATAGRAM_LEN:
       if ((uint64_t)nread >
           conn->local.transport_params.max_datagram_frame_size) {
+        fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
         return NGTCP2_ERR_PROTO;
       }
       rv = conn_recv_datagram(conn, &fr->datagram);
@@ -9981,6 +10176,7 @@ static int conn_validate_early_transport_params_limits(ngtcp2_conn *conn) {
           params->initial_max_streams_uni ||
       conn->early.transport_params.max_datagram_frame_size >
           params->max_datagram_frame_size) {
+    fprintf(stderr, "\nreturn ERR_PROTO on line %d\n\n", __LINE__);
     return NGTCP2_ERR_PROTO;
   }
 
@@ -12038,6 +12234,7 @@ conn_write_connection_close(ngtcp2_conn *conn, ngtcp2_pkt_info *pi,
   res += nwrite;
 
   if (res == 0) {
+    fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     return NGTCP2_ERR_NOBUF;
   }
 
@@ -12192,6 +12389,7 @@ ngtcp2_ssize ngtcp2_conn_write_application_close_pkt(
   res += nwrite;
 
   if (res == 0) {
+    fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     return NGTCP2_ERR_NOBUF;
   }
 
@@ -13558,10 +13756,12 @@ ngtcp2_ssize ngtcp2_pkt_write_connection_close(
   rv = ngtcp2_ppe_encode_hd(&ppe, &hd);
   if (rv != 0) {
     assert(NGTCP2_ERR_NOBUF == rv);
+    fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     return rv;
   }
 
   if (!ngtcp2_ppe_ensure_hp_sample(&ppe)) {
+    fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     return NGTCP2_ERR_NOBUF;
   }
 
@@ -13573,6 +13773,7 @@ ngtcp2_ssize ngtcp2_pkt_write_connection_close(
   rv = ngtcp2_ppe_encode_frame(&ppe, &fr);
   if (rv != 0) {
     assert(NGTCP2_ERR_NOBUF == rv);
+    fprintf(stderr, "\nreturn ERR_NOBUF on line %d\n\n", __LINE__);
     return rv;
   }
 
